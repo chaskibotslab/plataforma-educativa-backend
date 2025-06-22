@@ -179,6 +179,56 @@ app.get('/api/cursos/:nivelId', async (req, res) => {
   }
 });
 
+// Obtener todos los cursos (nuevo endpoint)
+app.get('/api/cursos', async (req, res) => {
+  try {
+    const { nivel } = req.query;
+    
+    let query = supabase
+      .from('cursos')
+      .select(`
+        *,
+        niveles(nombre, descripcion, color, icono)
+      `)
+      .eq('activo', true)
+      .order('orden_curso');
+
+    if (nivel) {
+      const { data: nivelData } = await supabase
+        .from('niveles')
+        .select('id')
+        .eq('nombre', nivel)
+        .single();
+      
+      if (nivelData) {
+        query = query.eq('nivel_id', nivelData.id);
+      }
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('❌ Error obteniendo cursos:', error);
+      return res.status(500).json({ 
+        error: 'Error al obtener cursos',
+        details: error.message 
+      });
+    }
+
+    res.json({ 
+      success: true,
+      count: data.length,
+      cursos: data 
+    });
+  } catch (error) {
+    console.error('❌ Error obteniendo cursos:', error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      details: error.message 
+    });
+  }
+});
+
 // Obtener lecciones de un curso
 app.get('/api/lecciones/:cursoId', async (req, res) => {
   try {
@@ -243,9 +293,9 @@ app.get('/api/instituciones', async (req, res) => {
   }
 });
 
-// ====== REGISTRO SIMPLIFICADO ======
+// ====== AUTENTICACIÓN ======
 
-// Registro básico de estudiantes
+// Registro mejorado de estudiantes
 app.post('/api/auth/registro-estudiante', async (req, res) => {
   try {
     const { nombre, apellidos, email, password, codigo_institucion, grado } = req.body;
@@ -292,6 +342,29 @@ app.post('/api/auth/registro-estudiante', async (req, res) => {
       });
     }
 
+    // Crear registro en tabla usuarios
+    const { data: dbUser, error: dbError } = await supabase
+      .from('usuarios')
+      .insert([{
+        id: authUser.user.id, // Usar el mismo ID de auth
+        institucion_id: institucion.id,
+        nombre,
+        apellidos,
+        email,
+        password_hash: 'managed_by_supabase_auth', // Placeholder
+        rol: 'estudiante',
+        grado,
+        activo: true
+      }])
+      .select()
+      .single();
+
+    if (dbError) {
+      console.error('DB insert error:', dbError);
+      // Si falla la inserción en la tabla, continuar igual
+      console.log('Usuario creado en auth, pero no en tabla usuarios');
+    }
+
     res.status(201).json({
       success: true,
       message: 'Estudiante registrado exitosamente',
@@ -308,6 +381,154 @@ app.post('/api/auth/registro-estudiante', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error en registro:', error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      details: error.message 
+    });
+  }
+});
+
+// Login de estudiantes
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ 
+        error: 'Email y contraseña son requeridos' 
+      });
+    }
+
+    // Autenticar con Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (authError) {
+      console.error('Login error:', authError);
+      return res.status(401).json({ 
+        error: 'Credenciales inválidas' 
+      });
+    }
+
+    // Buscar información adicional del usuario en la tabla usuarios
+    const { data: userData, error: userError } = await supabase
+      .from('usuarios')
+      .select(`
+        id, nombre, apellidos, rol, grado, activo,
+        instituciones(nombre, codigo_acceso)
+      `)
+      .eq('email', email)
+      .eq('activo', true)
+      .single();
+
+    if (userError) {
+      console.log('No user data found in usuarios table, using auth data');
+      // Si no hay datos en la tabla usuarios, usar datos de auth
+      res.json({
+        success: true,
+        message: 'Login exitoso',
+        user: {
+          id: authData.user.id,
+          email: authData.user.email,
+          nombre: authData.user.user_metadata.nombre || 'Usuario',
+          apellidos: authData.user.user_metadata.apellidos || '',
+          rol: authData.user.user_metadata.rol || 'estudiante',
+          grado: authData.user.user_metadata.grado || 'sin-grado'
+        },
+        session: authData.session
+      });
+    } else {
+      // Usar datos de la tabla usuarios
+      res.json({
+        success: true,
+        message: 'Login exitoso',
+        user: {
+          id: userData.id,
+          email: email,
+          nombre: userData.nombre,
+          apellidos: userData.apellidos,
+          rol: userData.rol,
+          grado: userData.grado,
+          institucion: userData.instituciones?.nombre || 'Sin institución'
+        },
+        session: authData.session
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Error en login:', error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      details: error.message 
+    });
+  }
+});
+
+// Verificar sesión actual
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Token no proporcionado' });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'Token inválido' });
+    }
+
+    // Buscar datos adicionales en la tabla usuarios
+    const { data: userData } = await supabase
+      .from('usuarios')
+      .select(`
+        nombre, apellidos, rol, grado,
+        instituciones(nombre)
+      `)
+      .eq('id', user.id)
+      .single();
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        nombre: userData?.nombre || user.user_metadata.nombre || 'Usuario',
+        apellidos: userData?.apellidos || user.user_metadata.apellidos || '',
+        rol: userData?.rol || user.user_metadata.rol || 'estudiante',
+        grado: userData?.grado || user.user_metadata.grado || 'sin-grado',
+        institucion: userData?.instituciones?.nombre
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error verificando sesión:', error);
+    res.status(500).json({ 
+      error: 'Error interno del servidor',
+      details: error.message 
+    });
+  }
+});
+
+// Logout
+app.post('/api/auth/logout', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      const token = authHeader.replace('Bearer ', '');
+      await supabase.auth.signOut(token);
+    }
+
+    res.json({
+      success: true,
+      message: 'Logout exitoso'
+    });
+
+  } catch (error) {
+    console.error('❌ Error en logout:', error);
     res.status(500).json({ 
       error: 'Error interno del servidor',
       details: error.message 
