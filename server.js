@@ -34,10 +34,15 @@ app.use(helmet({
   },
 }));
 
+// ====== CONFIGURACIÓN CORS CORREGIDA ======
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.FRONTEND_URL, 'https://chaskibots.com'] 
-    : ['http://localhost:3000', 'http://localhost:5173'],
+  origin: [
+    'https://app.chaskibots.com',
+    'https://chaskibots.com',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    process.env.FRONTEND_URL
+  ].filter(Boolean), // Filtra valores undefined
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
